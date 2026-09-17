@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.jpg" alt="ACME - Aerosol and Cloud Microphysics Experiments" width="520">
+  <img src="docs/logo.svg" alt="ACME - Aerosol and Cloud Microphysics Experiments" width="520">
 </p>
 
 # ACME lab controller
