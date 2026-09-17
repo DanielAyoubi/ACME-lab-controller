@@ -1,0 +1,7 @@
+pyserial>=3.5
+minimalmodbus>=2.1
+pymodbus>=3.10
+PyQt6>=6.4
+pyqtgraph>=0.13
+numpy>=1.21
+matplotlib>=3.5

@@ -1,0 +1,196 @@
+import csv
+import os
+import queue
+import time
+from datetime import datetime
+
+from PyQt6.QtCore import QThread, pyqtSignal
+
+from devices import DEVICE_TYPES
+from experiment import save_summary_plot
+from humidity import calibrated_rh, rh_from_dewpoint
+
+RECONNECT_INTERVAL = 10  # seconds between attempts to reach a device that is not answering
+
+
+def data_units(setup):
+    """Every data column a setup produces, mapped to its unit."""
+    units = {}
+    for device in setup["devices"]:
+        for reading, unit in DEVICE_TYPES[device["type"]].readings.items():
+            units[f"{device['name']} {reading}"] = unit
+    dewpoint_column = f"{setup['cell_rh']['dewpoint_from']} dewpoint"
+    temperature_column = f"{setup['cell_rh']['temperature_from']} temperature"
+    if dewpoint_column in units and temperature_column in units:
+        units["Cell RH"] = "%"
+        units["Cell RH calibrated"] = "%"
+    return units
+
+
+class Worker(QThread):
+    """The only thread that talks to the hardware, because serial ports are not thread-safe.
+
+    The GUI sends it commands through `commands`:
+        ("set", device name, control, value)
+        ("start", steps)
+        ("stop",)
+    """
+
+    new_data = pyqtSignal(dict)
+    message = pyqtSignal(str)
+
+    def __init__(self, setup):
+        super().__init__()
+        self.setup = setup
+        self.units = data_units(setup)
+        self.commands = queue.Queue()
+        self.running = True
+
+        self.devices = {}
+        for device in setup["devices"]:
+            device_class = DEVICE_TYPES[device["type"]]
+            self.devices[device["name"]] = device_class(**{key: device[key] for key in device_class.settings})
+        self.connected = set()
+        self.last_attempt = {name: 0 for name in self.devices}
+
+        self.steps = []
+        self.step_index = 0
+        self.step_end = 0
+        self.log_file = None
+        self.log_writer = None
+        self.log_path = None
+
+    def run(self):
+        self.open_log("monitor")
+        next_poll = 0
+        while self.running:
+            while not self.commands.empty():
+                command = self.commands.get()
+                if command[0] == "set":
+                    self.set_value(command[1], command[2], command[3])
+                elif command[0] == "start":
+                    self.start_experiment(command[1])
+                elif command[0] == "stop" and self.steps:
+                    self.stop_experiment("Experiment stopped.")
+
+            if self.steps and time.time() >= self.step_end:
+                self.next_step()
+
+            if time.time() >= next_poll:
+                next_poll = time.time() + self.setup["poll_interval"]
+                self.poll()
+
+            time.sleep(0.05)
+
+        if self.steps:
+            self.stop_experiment("Experiment stopped by disconnect.")
+        self.close_log()
+        for name in self.connected:
+            device = self.devices[name]
+            # Stop the gas when the app lets go of an MFC.
+            if "flow" in device.controls:
+                try:
+                    device.set("flow", 0.0)
+                except Exception as error:
+                    self.message.emit(f"{name}: could not set the flow to 0 ({error})")
+            device.disconnect()
+        self.message.emit("Disconnected.")
+
+    def poll(self):
+        row = {"time": datetime.now().replace(microsecond=0), "step": ""}
+        if self.steps:
+            row["step"] = self.step_index + 1
+        for column in self.units:
+            row[column] = None
+
+        for name, device in self.devices.items():
+            if name not in self.connected:
+                if time.time() - self.last_attempt[name] < RECONNECT_INTERVAL:
+                    continue
+                self.last_attempt[name] = time.time()
+                try:
+                    device.connect()
+                    self.connected.add(name)
+                    self.message.emit(f"{name} connected.")
+                except Exception as error:
+                    self.message.emit(f"{name}: not answering ({error})")
+                    continue
+            try:
+                for reading, value in device.read().items():
+                    row[f"{name} {reading}"] = value
+            except Exception as error:
+                self.message.emit(f"{name}: read failed, will reconnect ({error})")
+                self.connected.discard(name)
+                self.last_attempt[name] = time.time()
+                try:
+                    device.disconnect()
+                except Exception:
+                    pass
+
+        if "Cell RH" in self.units:
+            dewpoint = row[f"{self.setup['cell_rh']['dewpoint_from']} dewpoint"]
+            temperature = row[f"{self.setup['cell_rh']['temperature_from']} temperature"]
+            if dewpoint is not None and temperature is not None:
+                row["Cell RH"] = rh_from_dewpoint(dewpoint, temperature)
+                row["Cell RH calibrated"] = calibrated_rh(row["Cell RH"])
+
+        self.log_writer.writerow(row)
+        # Flush every row so the CSV can be watched live and a crash loses nothing.
+        self.log_file.flush()
+        self.new_data.emit(row)
+
+    def set_value(self, name, control, value):
+        if name not in self.connected:
+            self.message.emit(f"Cannot set {name} {control}: device is not connected.")
+            return
+        try:
+            self.devices[name].set(control, value)
+            self.message.emit(f"{name} {control} set to {value}")
+        except Exception as error:
+            self.message.emit(f"Cannot set {name} {control}: {error}")
+
+    def start_experiment(self, steps):
+        if self.steps:
+            self.stop_experiment("Previous experiment stopped.")
+        self.open_log("experiment")
+        self.steps = steps
+        self.step_index = -1
+        self.step_end = 0  # so the first step starts straight away
+
+    def next_step(self):
+        self.step_index += 1
+        if self.step_index == len(self.steps):
+            self.stop_experiment("Experiment finished.")
+            return
+        step = self.steps[self.step_index]
+        for (name, control), value in step["setpoints"].items():
+            self.set_value(name, control, value)
+        self.step_end = time.time() + step["minutes"] * 60
+        self.message.emit(f"Step {self.step_index + 1}/{len(self.steps)} started, holding {step['minutes']:g} min.")
+
+    def stop_experiment(self, text):
+        self.steps = []
+        experiment_csv = self.log_path
+        self.close_log()
+        try:
+            png_path = save_summary_plot(experiment_csv, self.units)
+            self.message.emit(f"{text} Data saved to {experiment_csv} and {png_path}")
+        except Exception as error:
+            self.message.emit(f"{text} Data saved to {experiment_csv}, but the plot failed: {error}")
+        if self.running:
+            self.open_log("monitor")
+
+    def open_log(self, prefix):
+        self.close_log()
+        now = datetime.now()
+        folder = os.path.join(self.setup["log_folder"], now.strftime("%Y-%m-%d"))
+        os.makedirs(folder, exist_ok=True)
+        self.log_path = os.path.join(folder, f"{prefix}_{now:%H%M%S}.csv")
+        self.log_file = open(self.log_path, "w", newline="", encoding="utf-8")
+        self.log_writer = csv.DictWriter(self.log_file, ["time", "step"] + list(self.units))
+        self.log_writer.writeheader()
+
+    def close_log(self):
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None

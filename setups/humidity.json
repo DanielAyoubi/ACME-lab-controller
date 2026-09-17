@@ -1,0 +1,44 @@
+{
+  "log_folder": "data",
+  "poll_interval": 2.0,
+  "devices": [
+    {
+      "name": "Humid MFC",
+      "type": "vogtlin_mfc",
+      "port": "COM23",
+      "baudrate": 9600,
+      "address": 24
+    },
+    {
+      "name": "Dry MFC",
+      "type": "vogtlin_mfc",
+      "port": "COM22",
+      "baudrate": 9600,
+      "address": 23
+    },
+    {
+      "name": "RH upstream",
+      "type": "vaisala_rh",
+      "port": "COM24",
+      "baudrate": 19200,
+      "address": 240
+    },
+    {
+      "name": "RH downstream",
+      "type": "vaisala_rh",
+      "port": "COM21",
+      "baudrate": 19200,
+      "address": 240
+    },
+    {
+      "name": "FireSting O2",
+      "type": "firesting_o2",
+      "port": "COM20",
+      "baudrate": 19200
+    }
+  ],
+  "cell_rh": {
+    "dewpoint_from": "",
+    "temperature_from": ""
+  }
+}
