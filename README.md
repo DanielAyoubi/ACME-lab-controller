@@ -112,18 +112,3 @@ The Devices dialog, manual controls, plot, CSV and experiment table then pick it
 automatically. Readings with a new unit get their own plot panel. A device with an
 `address` setting (Modbus) must also accept a `timeout` argument, because the scan passes
 a short one to sweep addresses quickly.
-
-## Code map
-
-| file | what it does |
-|------|--------------|
-| `main.py` | starts the app |
-| `worker.py` | the one background thread that talks to the hardware: polling, reconnecting, setpoints, experiment steps, CSV logging |
-| `experiment.py` | humidity-cycle step generator and the PNG summary |
-| `humidity.py` | RH from dew point, cell calibration |
-| `control.py` | the PID that holds the RH |
-| `devices/` | one file per instrument, plus `scan.py` for auto-detect |
-| `gui/main_window.py` | window, setup files, device readouts and manual controls |
-| `gui/devices_dialog.py` | device table, detect, settings |
-| `gui/experiment_panel.py` | humidity-cycle form and step table |
-| `gui/plot.py` | live plot, one panel per unit |
