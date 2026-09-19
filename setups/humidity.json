@@ -10,13 +10,6 @@
       "address": 24
     },
     {
-      "name": "Dry MFC",
-      "type": "vogtlin_mfc",
-      "port": "COM22",
-      "baudrate": 9600,
-      "address": 23
-    },
-    {
       "name": "RH upstream",
       "type": "vaisala_rh",
       "port": "COM24",
@@ -24,21 +17,25 @@
       "address": 240
     },
     {
-      "name": "RH downstream",
-      "type": "vaisala_rh",
-      "port": "COM21",
-      "baudrate": 19200,
-      "address": 240
-    },
-    {
-      "name": "FireSting O2",
-      "type": "firesting_o2",
-      "port": "COM20",
-      "baudrate": 19200
+      "name": "Vögtlin MFC 3",
+      "type": "vogtlin_mfc",
+      "port": "COM25",
+      "baudrate": 9600,
+      "address": 1
     }
   ],
   "cell_rh": {
     "dewpoint_from": "",
     "temperature_from": ""
+  },
+  "rh_control": {
+    "source": "RH upstream rh",
+    "humid_mfc": "Humid MFC",
+    "dry_mfc": "Vögtlin MFC 3",
+    "target": 60.0,
+    "total_flow": 2.0,
+    "kp": 1.0,
+    "ki": 0.03,
+    "kd": 0.0
   }
 }

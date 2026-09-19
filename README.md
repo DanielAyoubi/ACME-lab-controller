@@ -31,7 +31,14 @@ python -m venv .venv
    to disk as soon as it is read.
 3. **Manual control** has a row for each setpoint a device accepts (MFC flow, chiller
    temperature, …).
-4. **Experiment** tab: fill the step table with the *Humidity cycle* form, or type steps
+4. **RH control** holds the RH at a target instead of you chasing it by hand. Pick the RH
+   reading to follow, which MFC carries the humid air and which the dry, a target and a total
+   flow, then click **Hold RH**. A PID moves the humid share of the flow; the total flow stays
+   where you set it. The target and the gains can be changed while it holds. `Kp` is % share per
+   % RH, `Ki` per % RH second and `Kd` per % RH per second; start with `Kd` at 0, since the RH
+   signal is noisy. The loop waits quietly while a reading or an MFC is missing, and switches
+   itself off when an experiment starts, because the step table sets the same two flows.
+5. **Experiment** tab: fill the step table with the *Humidity cycle* form, or type steps
    yourself. Each step holds for its time in minutes and sets the values in its row. An
    empty cell leaves that setpoint unchanged. **Start experiment** logs to
    `experiment_HHMMSS.csv` and saves a PNG summary next to it when the experiment ends
@@ -56,7 +63,9 @@ File → Open setup. The app reopens the last setup you used.
     {"name": "Humid MFC", "type": "vogtlin_mfc", "port": "COM23", "baudrate": 9600, "address": 24},
     {"name": "RH upstream", "type": "vaisala_rh", "port": "COM24", "baudrate": 19200, "address": 240}
   ],
-  "cell_rh": {"dewpoint_from": "", "temperature_from": ""}
+  "cell_rh": {"dewpoint_from": "", "temperature_from": ""},
+  "rh_control": {"source": "RH downstream rh", "humid_mfc": "Humid MFC", "dry_mfc": "Dry MFC",
+                 "target": 60.0, "total_flow": 2.0, "kp": 1.0, "ki": 0.03, "kd": 0.0}
 }
 ```
 
@@ -64,6 +73,9 @@ File → Open setup. The app reopens the last setup you used.
 - `cell_rh`: pick a device that measures dew point and another that measures temperature
   (for example the Julabo's external probe). The app then adds `Cell RH` (Magnus formula)
   and `Cell RH calibrated` (salt-deliquescence fit in `humidity.py`).
+- `rh_control`: what the RH control box starts with. The box writes back to it, so the last
+  target and gains are there next time. With a `source` set, the log gains the columns
+  `RH control setpoint` and `RH control share` (the humid share the PID asks for).
 - A relative `log_folder` is relative to the app folder.
 
 ## Supported devices
@@ -109,6 +121,7 @@ a short one to sweep addresses quickly.
 | `worker.py` | the one background thread that talks to the hardware: polling, reconnecting, setpoints, experiment steps, CSV logging |
 | `experiment.py` | humidity-cycle step generator and the PNG summary |
 | `humidity.py` | RH from dew point, cell calibration |
+| `control.py` | the PID that holds the RH |
 | `devices/` | one file per instrument, plus `scan.py` for auto-detect |
 | `gui/main_window.py` | window, setup files, device readouts and manual controls |
 | `gui/devices_dialog.py` | device table, detect, settings |

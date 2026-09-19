@@ -13,7 +13,6 @@ def rh_from_dewpoint(dewpoint, temperature):
 
 def calibrated_rh(rh):
     """Correct the RH at the external (cell) temperature to the real RH inside the cell.
-
     Fit from deliquescence of pure salts, version 09 June 2026.
     """
     return 0.9641 * rh + 1.2871

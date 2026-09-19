@@ -6,6 +6,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from control import PID
 from devices import DEVICE_TYPES
 from experiment import save_summary_plot
 from humidity import calibrated_rh, rh_from_dewpoint
@@ -14,7 +15,6 @@ RECONNECT_INTERVAL = 10  # seconds between attempts to reach a device that is no
 
 
 def data_units(setup):
-    """Every data column a setup produces, mapped to its unit."""
     units = {}
     for device in setup["devices"]:
         for reading, unit in DEVICE_TYPES[device["type"]].readings.items():
@@ -24,6 +24,10 @@ def data_units(setup):
     if dewpoint_column in units and temperature_column in units:
         units["Cell RH"] = "%"
         units["Cell RH calibrated"] = "%"
+    # Only when the reading the loop follows is really there: no source means no columns either.
+    if setup["rh_control"]["source"] in units:
+        units["RH control setpoint"] = "%"
+        units["RH control share"] = "%"
     return units
 
 
@@ -34,10 +38,13 @@ class Worker(QThread):
         ("set", device name, control, value)
         ("start", steps)
         ("stop",)
+        ("rh_control", settings, on)
     """
 
     new_data = pyqtSignal(dict)
     message = pyqtSignal(str)
+    # Emitted when the worker itself turns the RH loop on or off, so the button can follow.
+    rh_control_state = pyqtSignal(bool)
 
     def __init__(self, setup):
         super().__init__()
@@ -52,6 +59,12 @@ class Worker(QThread):
             self.devices[device["name"]] = device_class(**{key: device[key] for key in device_class.settings})
         self.connected = set()
         self.last_attempt = {name: 0 for name in self.devices}
+
+        self.rh = setup["rh_control"]
+        self.rh_enabled = False
+        self.pid = None
+        self.last_rh_time = 0
+        self.last_row = None
 
         self.steps = []
         self.step_index = 0
@@ -72,6 +85,8 @@ class Worker(QThread):
                     self.start_experiment(command[1])
                 elif command[0] == "stop" and self.steps:
                     self.stop_experiment("Experiment stopped.")
+                elif command[0] == "rh_control":
+                    self.set_rh_control(command[1], command[2])
 
             if self.steps and time.time() >= self.step_end:
                 self.next_step()
@@ -134,10 +149,13 @@ class Worker(QThread):
                 row["Cell RH"] = rh_from_dewpoint(dewpoint, temperature)
                 row["Cell RH calibrated"] = calibrated_rh(row["Cell RH"])
 
+        self.update_rh_control(row)
+
         self.log_writer.writerow(row)
         # Flush every row so the CSV can be watched live and a crash loses nothing.
         self.log_file.flush()
         self.new_data.emit(row)
+        self.last_row = row
 
     def set_value(self, name, control, value):
         if name not in self.connected:
@@ -149,7 +167,74 @@ class Worker(QThread):
         except Exception as error:
             self.message.emit(f"Cannot set {name} {control}: {error}")
 
+    def set_rh_control(self, settings, on):
+        self.rh = settings
+        if self.pid is not None:
+            self.pid.kp = settings["kp"]
+            self.pid.ki = settings["ki"]
+            self.pid.kd = settings["kd"]
+        if on == self.rh_enabled:
+            return
+        if on:
+            humid = settings["humid_mfc"]
+            dry = settings["dry_mfc"]
+            if settings["source"] not in self.units:
+                self.message.emit("RH control needs an RH reading to follow.")
+            elif humid == dry or humid not in self.devices or dry not in self.devices:
+                self.message.emit("RH control needs two different MFCs.")
+            elif settings["total_flow"] <= 0:
+                self.message.emit("RH control needs a total flow above 0.")
+            else:
+                # Start from the share the humid MFC is set to now, so the flows do not jump.
+                share = 50.0
+                setpoint = self.last_row.get(f"{humid} setpoint") if self.last_row else None
+                if setpoint is not None:
+                    share = min(100.0, max(0.0, 100.0 * setpoint / settings["total_flow"]))
+                self.pid = PID(settings["kp"], settings["ki"], settings["kd"], share)
+                self.last_rh_time = 0
+                self.rh_enabled = True
+                self.message.emit(f"RH control on, holding {settings['target']:g} %.")
+        else:
+            self.rh_enabled = False
+            self.pid = None
+            self.message.emit("RH control off. The flows stay where they are.")
+        self.rh_control_state.emit(self.rh_enabled)
+
+    def update_rh_control(self, row):
+        if "RH control setpoint" not in self.units or not self.rh_enabled:
+            return
+        row["RH control setpoint"] = self.rh["target"]
+        humid = self.rh["humid_mfc"]
+        dry = self.rh["dry_mfc"]
+        measurement = row[self.rh["source"]]
+        # Without a reading or an MFC, hold the flows where they are instead of integrating blindly.
+        if measurement is None or humid not in self.connected or dry not in self.connected:
+            return
+
+        now = time.time()
+        dt = now - self.last_rh_time
+        # A first pass, a gap while a device was away, or a clock step: one poll interval is safer
+        # than integrating a long, zero or negative dt.
+        if dt <= 0 or dt > 10 * self.setup["poll_interval"]:
+            dt = self.setup["poll_interval"]
+        self.last_rh_time = now
+        share = self.pid.update(self.rh["target"], measurement, dt)
+        row["RH control share"] = share
+
+        humid_flow = round(self.rh["total_flow"] * share / 100, 4)
+        dry_flow = round(self.rh["total_flow"] - humid_flow, 4)
+        for name, flow in ((humid, humid_flow), (dry, dry_flow)):
+            try:
+                self.devices[name].set("flow", flow)
+            except Exception as error:
+                self.message.emit(f"{name}: setting the flow failed, will reconnect ({error})")
+                self.connected.discard(name)
+                self.last_attempt[name] = time.time()
+
     def start_experiment(self, steps):
+        if self.rh_enabled:
+            self.set_rh_control(self.rh, False)
+            self.message.emit("RH control switched off: the experiment sets the flows itself.")
         if self.steps:
             self.stop_experiment("Previous experiment stopped.")
         self.open_log("experiment")
@@ -160,6 +245,13 @@ class Worker(QThread):
     def next_step(self):
         self.step_index += 1
         if self.step_index == len(self.steps):
+            # set flows to 0 when experiment finishes
+            for device in self.devices.values():
+                if "flow" in device.controls:
+                    try:
+                        device.set("flow", 0.0)
+                    except Exception as error:
+                        self.message.emit(f"{device.name}: could not set the flow to 0 ({error})")
             self.stop_experiment("Experiment finished.")
             return
         step = self.steps[self.step_index]

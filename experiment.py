@@ -5,11 +5,6 @@ from matplotlib.figure import Figure
 
 
 def humidity_cycle(humid_mfc, dry_mfc, total_flow, low, high, step, hold_minutes, cycles):
-    """Steps that move the humid share of the flow low -> high -> low, `cycles` times, ending at low.
-
-    The humid share is the percentage of `total_flow` sent through the humid MFC; the dry MFC
-    supplies the rest. With a saturating bubbler this share is roughly the RH.
-    """
     rising = []
     i = 0
     while round(low + i * step, 6) < high:
@@ -32,7 +27,6 @@ def humidity_cycle(humid_mfc, dry_mfc, total_flow, low, high, step, hold_minutes
 
 
 def save_summary_plot(csv_path, units):
-    """Save a quick-look PNG next to the CSV, one panel per unit. Returns the PNG path."""
     with open(csv_path, newline="", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
     if not rows:

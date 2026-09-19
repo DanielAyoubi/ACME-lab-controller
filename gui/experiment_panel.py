@@ -7,11 +7,12 @@ from devices import DEVICE_TYPES
 from experiment import humidity_cycle
 
 
-def spin_box(minimum, maximum, value, suffix):
+def spin_box(minimum, maximum, value, suffix, step=1.0):
     box = QDoubleSpinBox()
     box.setRange(minimum, maximum)
     box.setValue(value)
     box.setSuffix(suffix)
+    box.setSingleStep(step)  # how far one click of an arrow, or one arrow key, moves the value
     return box
 
 
@@ -26,7 +27,7 @@ class ExperimentPanel(QWidget):
 
         self.humid_mfc = QComboBox()
         self.dry_mfc = QComboBox()
-        self.total_flow = spin_box(0, 100, 2.0, " L/min")
+        self.total_flow = spin_box(0, 100, 2.0, " L/min", step=0.1)
         self.low = spin_box(0, 100, 0, " %")
         self.high = spin_box(0, 100, 90, " %")
         self.step = spin_box(0.1, 100, 10, " %")
@@ -100,6 +101,7 @@ class ExperimentPanel(QWidget):
         self.table.setColumnCount(1 + len(self.controls))
         headers = ["Hold (min)"] + [f"{name} {control} ({unit})" for name, control, unit in self.controls]
         self.table.setHorizontalHeaderLabels(headers)
+        self.table.resizeColumnsToContents()  # the header names are the widest thing in a column
         self.update_summary()
 
     def add_step(self, step=None):

@@ -1,15 +1,16 @@
 import json
 import os
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
-    QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSplitter, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from devices import DEVICE_TYPES
 from gui.devices_dialog import DevicesDialog
-from gui.experiment_panel import ExperimentPanel
+from gui.experiment_panel import ExperimentPanel, spin_box
 from gui.plot import LivePlot
 from worker import Worker, data_units
 
@@ -26,6 +27,8 @@ class MainWindow(QMainWindow):
         self.status_dots = {}
         self.value_labels = {}
         self.units = {}
+        self.rh_hold = None  # stays None when the setup has no two MFCs to split the flow between
+        self.column_width = None  # set once the handle is dragged, and then left alone
 
         file_menu = self.menuBar().addMenu("File")
         self.open_action = file_menu.addAction("Open setup…")
@@ -43,10 +46,8 @@ class MainWindow(QMainWindow):
         top_row.addWidget(self.devices_button)
         top_row.addWidget(self.connect_button)
 
-        # The left column is rebuilt from the setup, see rebuild().
         self.left_column = QScrollArea()
         self.left_column.setWidgetResizable(True)
-        self.left_column.setFixedWidth(360)
 
         self.plot = LivePlot()
         clear_button = QPushButton("Clear plot")
@@ -60,13 +61,16 @@ class MainWindow(QMainWindow):
         tabs.addTab(plot_tab, "Plot")
         tabs.addTab(self.experiment_panel, "Experiment")
 
-        body = QHBoxLayout()
-        body.addWidget(self.left_column)
-        body.addWidget(tabs)
+        # A splitter, so the column can be dragged away from the width rebuild() gives it.
+        self.body = QSplitter(Qt.Orientation.Horizontal)
+        self.body.addWidget(self.left_column)
+        self.body.addWidget(tabs)
+        self.body.setStretchFactor(1, 1)  # a wider window gives the extra width to the tabs
+        self.body.splitterMoved.connect(self.column_dragged)
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.addLayout(top_row)
-        layout.addLayout(body)
+        layout.addWidget(self.body)
         self.setCentralWidget(central)
 
         path = self.settings.value("setup_path", DEFAULT_SETUP)
@@ -83,6 +87,8 @@ class MainWindow(QMainWindow):
             setup.setdefault("poll_interval", 2.0)
             setup.setdefault("devices", [])
             setup.setdefault("cell_rh", {"dewpoint_from": "", "temperature_from": ""})
+            setup.setdefault("rh_control", {"source": "", "humid_mfc": "", "dry_mfc": "", "target": 50.0,
+                                            "total_flow": 2.0, "kp": 1.0, "ki": 0.03, "kd": 0.0})
             for device in setup["devices"]:
                 if device["type"] not in DEVICE_TYPES:
                     raise ValueError(f"Unknown device type '{device['type']}'")
@@ -156,6 +162,7 @@ class MainWindow(QMainWindow):
                 value_box = QDoubleSpinBox()
                 value_box.setRange(-1000, 10000)
                 value_box.setDecimals(2)
+                value_box.setSingleStep(0.1)
                 value_box.setSuffix(f" {unit}")
                 set_button = QPushButton("Set")
                 # The default arguments freeze this row's device, control and box inside the lambda.
@@ -169,10 +176,94 @@ class MainWindow(QMainWindow):
         if row > 0:
             layout.addWidget(control_group)
 
+        self.rh_hold = None
+        flow_devices = [device["name"] for device in self.setup["devices"]
+                        if "flow" in DEVICE_TYPES[device["type"]].controls]
+        if len(flow_devices) > 1:
+            layout.addWidget(self.rh_control_box(flow_devices))
+
         layout.addStretch()
         self.left_column.setWidget(panel)
+        width = self.column_width
+        if width is None:
+            width = panel.sizeHint().width() + self.left_column.verticalScrollBar().sizeHint().width()
+        self.body.setSizes([width, max(width, self.body.width() - width)])
         self.plot.configure(self.units)
         self.experiment_panel.configure(self.setup)
+
+    def column_dragged(self, position, index):
+        self.column_width = position
+
+    def rh_control_box(self, flow_devices):
+        settings = self.setup["rh_control"]
+        self.rh_source = QComboBox()
+        # Every RH-like column: a device's "rh" reading, or the RH worked out from a dew point.
+        self.rh_source.addItems([column for column in self.units
+                                 if column.endswith(" rh") or column.startswith("Cell RH")])
+        self.rh_source.setCurrentText(settings["source"])
+        self.rh_humid = QComboBox()
+        self.rh_humid.addItems(flow_devices)
+        self.rh_humid.setCurrentText(settings["humid_mfc"])
+        self.rh_dry = QComboBox()
+        self.rh_dry.addItems(flow_devices)
+        self.rh_dry.setCurrentText(settings["dry_mfc"])
+        self.rh_target = spin_box(0, 100, settings["target"], " %")
+        self.rh_total = spin_box(0, 100, settings["total_flow"], " L/min", step=0.1)
+        self.rh_kp = spin_box(0, 100, settings["kp"], "")
+        self.rh_ki = spin_box(0, 100, settings["ki"], "")
+        self.rh_kd = spin_box(0, 100, settings["kd"], "")
+        self.rh_hold = QPushButton("Hold RH")
+        self.rh_hold.setCheckable(True)
+        self.rh_status = QLabel("off")
+
+        gains = QHBoxLayout()
+        for name, box in (("Kp", self.rh_kp), ("Ki", self.rh_ki), ("Kd", self.rh_kd)):
+            box.setDecimals(3)
+            box.setSingleStep(0.01)  # the arrow keys still step, even without the buttons
+            # Three of these side by side would otherwise set the width of the whole column.
+            box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            box.setMaximumWidth(75)
+            # spin_box had only 2 decimals when it set the value, so set it again.
+            box.setValue(settings[name.lower()])
+            gains.addWidget(QLabel(name))
+            gains.addWidget(box)
+
+        form = QFormLayout()
+        form.addRow("RH source", self.rh_source)
+        form.addRow("Humid MFC", self.rh_humid)
+        form.addRow("Dry MFC", self.rh_dry)
+        form.addRow("Target RH", self.rh_target)
+        form.addRow("Total flow", self.rh_total)
+        form.addRow(gains)  # spans both columns: Kp, Ki and Kd label themselves
+        form.addRow(self.rh_hold)
+        form.addRow(self.rh_status)
+        box = QGroupBox("RH control")
+        box.setLayout(form)
+
+        # Connect only now, so filling in the saved values above did not count as an edit.
+        for widget in (self.rh_source, self.rh_humid, self.rh_dry):
+            widget.currentIndexChanged.connect(self.rh_changed)
+        for widget in (self.rh_target, self.rh_total, self.rh_kp, self.rh_ki, self.rh_kd):
+            widget.editingFinished.connect(self.rh_changed)
+        self.rh_hold.clicked.connect(self.rh_changed)
+        return box
+
+    def rh_changed(self):
+        """Save what the RH control box shows, and hand it to a running worker."""
+        self.setup["rh_control"] = {
+            "source": self.rh_source.currentText(),
+            "humid_mfc": self.rh_humid.currentText(),
+            "dry_mfc": self.rh_dry.currentText(),
+            "target": self.rh_target.value(),
+            "total_flow": self.rh_total.value(),
+            "kp": self.rh_kp.value(),
+            "ki": self.rh_ki.value(),
+            "kd": self.rh_kd.value(),
+        }
+        self.save_setup()
+        if self.worker is None:
+            self.rh_hold.setChecked(False)
+        self.send(("rh_control", self.setup["rh_control"], self.rh_hold.isChecked()))
 
     def send(self, command):
         if self.worker is None:
@@ -182,9 +273,13 @@ class MainWindow(QMainWindow):
 
     def toggle_connection(self):
         if self.worker is None:
+            # Rebuild first: the RH source picked in the box decides which columns the worker logs.
+            self.rebuild()
             self.worker = Worker(self.setup)
             self.worker.new_data.connect(self.show_data)
             self.worker.message.connect(self.statusBar().showMessage)
+            if self.rh_hold is not None:
+                self.worker.rh_control_state.connect(self.rh_hold.setChecked)
             self.worker.start()
             self.statusBar().showMessage("Connecting…")
             self.connect_button.setText("Disconnect")
@@ -201,6 +296,11 @@ class MainWindow(QMainWindow):
         self.devices_button.setEnabled(not connected)
         self.open_action.setEnabled(not connected)
         self.experiment_panel.set_connected(connected)
+        if self.rh_hold is not None:
+            # These three name CSV columns and devices, so they must not change under the worker.
+            self.rh_source.setEnabled(not connected)
+            self.rh_humid.setEnabled(not connected)
+            self.rh_dry.setEnabled(not connected)
 
     def show_data(self, row):
         if self.worker is None:
@@ -221,6 +321,14 @@ class MainWindow(QMainWindow):
                 label.setText(f"{row[column]:.2f} {self.units[column]}")
         self.plot.add(row)
         self.experiment_panel.show_step(row["step"])
+        if self.rh_hold is not None:
+            if row.get("RH control setpoint") is None:
+                self.rh_status.setText("off")
+            elif row.get("RH control share") is None:
+                self.rh_status.setText("holding, waiting for a reading")
+            else:
+                self.rh_status.setText(f"holding {row['RH control setpoint']:g} %, "
+                                       f"humid share {row['RH control share']:.1f} %")
 
     def closeEvent(self, event):
         if self.worker is not None:
